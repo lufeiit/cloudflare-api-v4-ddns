@@ -130,7 +130,7 @@ if [[ -z "$CFZONE_NAME" ]]; then
     log_error "缺少 Zone 名称（-z），例如 example.com"
     exit 2
 fi
-if [[ "$CFRECORD_TYPE" != "A" && "$CFRECORD_TYPE" != "AAAA" ]]; 键，然后
+if [[ "$CFRECORD_TYPE" != "A" && "$CFRECORD_TYPE" != "AAAA" ]]; then
     log_error "记录类型（-t）只能是 A（IPv4）或 AAAA（IPv6）"
     exit 2
 fi
