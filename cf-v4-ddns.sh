@@ -44,19 +44,17 @@ CFTTL=60
 # Ignore local file, update ip anyway
 FORCE=false
 
-WANIPSITE="http://ipv4.icanhazip.com"
-
-# Site to retrieve WAN ip, other examples are: bot.whatismyipaddress.com, https://api.ipify.org/ ...
+# 根据类型设置 IP 获取地址
 if [ "$CFRECORD_TYPE" = "A" ]; then
-  :
+    WANIPSITE="http://ipv4.icanhazip.com"
 elif [ "$CFRECORD_TYPE" = "AAAA" ]; then
-  WANIPSITE="http://ipv6.icanhazip.com"
+    WANIPSITE="http://ipv6.icanhazip.com"
 else
-  echo "$CFRECORD_TYPE specified is invalid, CFRECORD_TYPE can only be A(for IPv4)|AAAA(for IPv6)"
-  exit 2
+    echo "错误: 记录类型必须是 A 或 AAAA"
+    exit 2
 fi
 
-# get parameter
+# 参数解析
 while getopts k:h:z:t:f: opts; do
   case ${opts} in
     k) CFKEY=${OPTARG} ;;
@@ -67,71 +65,72 @@ while getopts k:h:z:t:f: opts; do
   esac
 done
 
-# If required settings are missing just exit
-if [ "$CFKEY" = "" ]; then
-  echo "Missing api-key, get at: https://www.cloudflare.com/a/account/my-account"
-  echo "and save in ${0} or using the -k flag"
-  exit 2
-fi
-if [ "$CFRECORD_NAME" = "" ]; then 
-  echo "Missing hostname, what host do you want to update?"
-  echo "save in ${0} or using the -h flag"
-  exit 2
+# 校验基础参数
+if [ -z "$CFKEY" ] || [ -z "$CFRECORD_NAME" ] || [ -z "$CFZONE_NAME" ]; then
+    echo "错误: 缺少必要参数 (Key, Hostname 或 Zone)"
+    exit 2
 fi
 
-# If the hostname is not a FQDN
-if [ "$CFRECORD_NAME" != "$CFZONE_NAME" ] && ! [ -z "${CFRECORD_NAME##*$CFZONE_NAME}" ]; then
-  CFRECORD_NAME="$CFRECORD_NAME.$CFZONE_NAME"
-  echo " => Hostname is not a FQDN, assuming $CFRECORD_NAME"
+# 补全 FQDN
+if [ "$CFRECORD_NAME" != "$CFZONE_NAME" ] && ! [[ "$CFRECORD_NAME" == *"$CFZONE_NAME" ]]; then
+    CFRECORD_NAME="$CFRECORD_NAME.$CFZONE_NAME"
 fi
 
-# Get current and old WAN ip
-WAN_IP=`curl -s ${WANIPSITE}`
-WAN_IP_FILE=$HOME/.cf-wan_ip_$CFRECORD_NAME.txt
-if [ -f $WAN_IP_FILE ]; then
-  OLD_WAN_IP=`cat $WAN_IP_FILE`
+# 1. 获取当前 WAN IP 并检测
+WAN_IP=$(curl -s -m 10 "${WANIPSITE}" || echo "")
+if [ -z "$WAN_IP" ]; then
+    echo "错误: 无法获取当前的 $CFRECORD_TYPE 地址。请检查网络或该设备是否支持 IPv6。"
+    exit 1
+fi
+echo "当前本地 IP: $WAN_IP"
+
+# 2. 获取 Zone ID
+CFZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
+    -H "Authorization: Bearer $CFKEY" \
+    -H "Content-Type: application/json" | grep -Eo '"id":"[^"]*' | sed 's/"id":"//' | head -1)
+
+if [ -z "$CFZONE_ID" ]; then
+    echo "错误: 找不到 Zone $CFZONE_NAME，请检查 API Token 权限或 Zone 名称。"
+    exit 1
+fi
+
+# 3. 获取 Record ID (检测是否存在)
+CFRECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME&type=$CFRECORD_TYPE" \
+    -H "Authorization: Bearer $CFKEY" \
+    -H "Content-Type: application/json" | grep -Eo '"id":"[^"]*' | sed 's/"id":"//' | head -1)
+
+# 4. 执行 更新 或 创建
+if [ -z "$CFRECORD_ID" ]; then
+    echo "检测到子域名 $CFRECORD_NAME 不存在，正在自动创建..."
+    # 使用 POST 协议创建新记录
+    RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records" \
+        -H "Authorization: Bearer $CFKEY" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$WAN_IP\",\"ttl\":$CFTTL}")
 else
-  echo "No file, need IP"
-  OLD_WAN_IP=""
+    # 检查 IP 是否有变化 (简单对比，不依赖本地文件以提高可靠性)
+    OLD_IP=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
+        -H "Authorization: Bearer $CFKEY" \
+        -H "Content-Type: application/json" | grep -Eo '"content":"[^"]*' | sed 's/"content":"//')
+
+    if [ "$WAN_IP" = "$OLD_IP" ] && [ "$FORCE" = false ]; then
+        echo "IP 未变化，跳过更新。"
+        exit 0
+    fi
+
+    echo "正在更新 $CFRECORD_NAME 的 IP..."
+    # 使用 PUT 协议更新现有记录
+    RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
+        -H "Authorization: Bearer $CFKEY" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$WAN_IP\",\"ttl\":$CFTTL}")
 fi
 
-# If WAN IP is unchanged an not -f flag, exit here
-if [ "$WAN_IP" = "$OLD_WAN_IP" ] && [ "$FORCE" = false ]; then
-  echo "WAN IP Unchanged, to update anyway use flag -f true"
-  exit 0
-fi
-
-# Get zone_identifier & record_identifier
-ID_FILE=$HOME/.cf-id_$CFRECORD_NAME.txt
-if [ -f $ID_FILE ] && [ $(wc -l $ID_FILE | cut -d " " -f 1) == 4 ] \
-  && [ "$(sed -n '3,1p' "$ID_FILE")" == "$CFZONE_NAME" ] \
-  && [ "$(sed -n '4,1p' "$ID_FILE")" == "$CFRECORD_NAME" ]; then
-    CFZONE_ID=$(sed -n '1,1p' "$ID_FILE")
-    CFRECORD_ID=$(sed -n '2,1p' "$ID_FILE")
+# 5. 结果校验
+if [[ "$RESPONSE" == *"\"success\":true"* ]]; then
+    echo "操作成功！"
 else
-    echo "Updating zone_identifier & record_identifier"
-    CFZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" -H "Authorization: Bearer $CFKEY" -H "Content-Type: application/json" | grep -Eo '"id":"[^"]*'|sed 's/"id":"//' | head -1 )
-    CFRECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" -H "Authorization: Bearer $CFKEY" -H "Content-Type: application/json"  | grep -Eo '"id":"[^"]*'|sed 's/"id":"//' | head -1 )
-    echo "$CFZONE_ID" > $ID_FILE
-    echo "$CFRECORD_ID" >> $ID_FILE
-    echo "$CFZONE_NAME" >> $ID_FILE
-    echo "$CFRECORD_NAME" >> $ID_FILE
-fi
-
-# If WAN is changed, update cloudflare
-echo "Updating DNS to $WAN_IP"
-
-RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
-  -H "Authorization: Bearer $CFKEY" \
-  -H "Content-Type: application/json" \
-  --data "{\"id\":\"$CFZONE_ID\",\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$WAN_IP\", \"ttl\":$CFTTL}")
-
-if [ "$RESPONSE" != "${RESPONSE%success*}" ] && [ "$(echo $RESPONSE | grep "\"success\":true")" != "" ]; then
-  echo "Updated succesfuly!"
-  echo $WAN_IP > $WAN_IP_FILE
-  exit
-else
-  echo 'Something went wrong :('
-  echo "Response: $RESPONSE"
-  exit 1
+    echo "操作失败，API 返回结果:"
+    echo "$RESPONSE"
+    exit 1
 fi
