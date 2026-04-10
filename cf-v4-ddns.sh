@@ -101,7 +101,7 @@ WANIPSITE_IPV6="http://ipv6.icanhazip.com"
 # 解析命令行参数
 # ------------------------------
 while getopts k:u:h:z:t:f: opts; do
-    case ${opts} 在
+    case ${opts} in
         k) CFKEY=${OPTARG} ;;
         u) CFUSER=${OPTARG} ;;
         h) CFRECORD_NAME=${OPTARG} ;;
